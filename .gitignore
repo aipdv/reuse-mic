@@ -1,0 +1,30 @@
+# environments and caches
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+inductor-cache/
+.cache/
+
+# media
+*.wav
+*.flac
+*.mp4
+*.mov
+*.aiff
+*.m4a
+demo/
+
+# build outputs
+*.dylib
+*.o
+native/reuse
+native/app/ReuseMic.app/
+
+# model weights and NVIDIA vendor repos (fetch with scripts/fetch_vendor.sh)
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.ckpt
+vendor/

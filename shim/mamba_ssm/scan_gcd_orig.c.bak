@@ -1,0 +1,55 @@
+// Sequential selective scan for Mamba, one fused pass, no allocations.
+// Layout (all contiguous float32):
+//   dt, u : [b, L, d]   (dt is pre-softplus; softplus is applied here)     A : [d, n]     B, C : [b, L, n]     Dskip : [d]
+//   y     : [b, L, d]  (output)
+// h_t = exp(dt_t * A) * h_{t-1} + dt_t * u_t * B_t ;  y_t = <h_t, C_t> + Dskip * u_t
+// Build: clang -O3 -ffast-math -fveclib=Darwin_libsystem_m -shared -o libscan.dylib scan.c
+// Channels (b*d) run in parallel on GCD; each channel is an independent sequential scan.
+#include <math.h>
+#include <string.h>
+#include <dispatch/dispatch.h>
+
+static inline float softplus(float x) { return x > 20.f ? x : log1pf(expf(x)); }
+#define QUEUE dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0)
+
+void selective_scan(const float *dt, const float *u, const float *A, const float *B,
+                    const float *C, const float *Dskip, float *y,
+                    int b, int L, int d, int n) {
+    dispatch_apply((size_t)b * d, QUEUE, ^(size_t job) {
+        int bi = (int)(job / d), di = (int)(job % d);
+        float h[16] = {0};
+        const float *Ad = A + di * n;
+        for (int t = 0; t < L; t++) {
+            long row = ((long)bi * L + t);
+            float dtv = softplus(dt[row * d + di]), uv = u[row * d + di];
+            const float *Bt = B + row * n, *Ct = C + row * n;
+            float acc = 0.f, du = dtv * uv, e[16];
+            for (int k = 0; k < n; k++) e[k] = dtv * Ad[k];
+            for (int k = 0; k < n; k++) e[k] = expf(e[k]);
+            for (int k = 0; k < n; k++) {
+                h[k] = e[k] * h[k] + du * Bt[k];
+                acc += h[k] * Ct[k];
+            }
+            y[row * d + di] = acc + Dskip[di] * uv;
+        }
+    });
+}
+
+// One streaming step. dt (pre-softplus), x : [b, d]; B, C : [b, n]; state : [b, d, n] (in/out); y : [b, d]
+void selective_step(const float *dt, const float *x, const float *A, const float *B,
+                    const float *C, const float *Dskip, float *state, float *y,
+                    int b, int d, int n) {
+    dispatch_apply((size_t)b, QUEUE, ^(size_t bi) {
+        for (int di = 0; di < d; di++) {
+            float dtv = softplus(dt[bi * d + di]), xv = x[bi * d + di], dx = dtv * xv, acc = 0.f, e[16];
+            const float *Ad = A + di * n, *Bt = B + bi * n, *Ct = C + bi * n;
+            float *h = state + ((long)bi * d + di) * n;
+            for (int k = 0; k < n; k++) e[k] = expf(dtv * Ad[k]);
+            for (int k = 0; k < n; k++) {
+                h[k] = e[k] * h[k] + dx * Bt[k];
+                acc += h[k] * Ct[k];
+            }
+            y[bi * d + di] = acc + Dskip[di] * xv;
+        }
+    });
+}
