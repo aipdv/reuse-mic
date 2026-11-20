@@ -52,3 +52,44 @@ Native profile 12k/4: scan 3.7 ms (fused NEON exp), sgemm 1.3, softplus+gate 0.7
 - ReuseMic.app (app/): Swift menu bar wrapper around `reuse live`. Self-contained, ad-hoc signed, NSMicrophoneUsageDescription set. Launch smoke-tested only; the engine was not started from it (no mic use while the user was away).
 - IO workgroup: worker and helper join the output device's `kAudioOutputUnitProperty_OSWorkgroup` (Apple's pattern for parallel real-time audio threads; `--workgroup 0` disables).
   A/B at load ~1.5: on and off both clean (0 underruns in 90 s at 16k/12/2T). Not proven to help; kept because it is the documented pattern and costs nothing.
+
+## 48 kHz full band (2026-11-19, evening)
+Goal: the model's full 48 kHz band live (before: 12/16 kHz, everything above 6/8 kHz cut). 48 kHz = 961 bins, 3x the 16 kHz rows.
+
+| config (M3 Air, live soak 60 s via BlackHole, paced) | median | p95 | underruns | CPU |
+|---|---|---|---|---|
+| before: 48k/4, 2 threads (bench) | 19.4 ms | 26.8 ms | not real time | |
+| 48k/4, 4 threads | 8.7 ms | 8.9 ms | 0 | 1.76 cores |
+| 48k/4, 3 threads | 10.9 ms | 11.1 ms | 5 | 1.66 cores |
+| 48k/4, 2 threads | 13.3 ms | 27 ms | 618 (RT demotion bursts) | |
+| 32k/4, 2 threads | 9.2 ms | 9.5 ms | 0 | 0.94 cores |
+| 24k/4, 2 threads | 7.3 ms | 7.7 ms | 0 | 0.74 cores |
+| 16k/4, 1 thread (bench) | 7.55 ms (was 8.6) | 8.2 ms | | 0.38 cores (was 0.45) |
+
+Parity: 106 dB vs the previous engine on the demo clip; 76.8 dB vs PyTorch LiveEnhancer at 48k (`parity_live.py 48000 4`, workspace venv has torchaudio).
+Quality: `lab/spec.py` spectrograms: 48k keeps clean sibilants/consonants up to ~20 kHz; 12k output stops at 6 kHz.
+
+Kernel log (single core, 48k/4: 24.8 -> 23.5 ms per hop; scan+softplus+gate 17.5 -> ~14 ms):
+1. Calibrated the core: 8.6 G vector FMA/s (`lab/peak.c`). The scan needs ~60 FP ops per channel-step, so it already ran near the FP ceiling: only op cuts help.
+2. exp -> exp2 with A pre-scaled by log2(e), shift trick (no frintn/fcvtzs), exponent added as an integer, no clamp:
+   a per-channel bound `vlim[d] = 125 / max|A2[d]|` guards the fast path; the clamped path runs when any dt in a 4-channel group exceeds it (0% on real data).
+   `-ffast-math` folds `(t + S) - S` to `t` and `t - n` to 0: the asm register barriers in `v_exp2_fast` are required.
+   Degree 4 was 8% faster but 72 dB parity; degree 5 keeps 106 dB. Kept degree 5.
+3. 4 channels per iteration, readout of 4 channels with one pairwise-add tree, D*u and the SiLU gate fused into the store.
+4. Softplus fused inside the scan loop made it 2x SLOWER: its latency heads every exp chain and the out-of-order window
+   cannot cover enough channel groups. Fix: a per-row pre-pass (softplus + silu(z) into 1 KB L1 buffers), then the scan.
+5. fdiv -> reciprocal estimate + 2 Newton steps in SiLU/softplus.
+6. Real FFT (vDSP zrop) instead of DFT matrices when n_fft allows (8..48 kHz): 48k matrices were 29 MB pinned and 29 MB read per hop.
+
+Threads: persistent pool (`pfor`), up to 4 threads, ~36 regions per hop: row chunks (encoder/decoder convs, time Mamba,
+Mamba projections) and channel chunks for the sequential frequency scans (fw/bw x 4 x 64 channels). CAS ticket tagged by
+region so late workers never run stale tasks. Workers spin 0.3 ms between regions, then sleep. Output is the same for any
+thread count (132 dB; sgemm row chunking only). Single thread uses one chunk (bigger sgemm calls).
+- sgemm (AMX) scales across threads: 527 -> 900 -> 1059 GFLOPS for 1/2/4 threads (`lab/amx_share.c`).
+- Summed task time grows ~1.6x at 4 threads (clock drop, shared AMX/L2): 4 threads = 1.7-1.8 cores at 48k.
+- Real-time class trap: a hop over the declared 15 ms computation demotes the thread (bursts of late hops). The bench now
+  paces hops every 20 ms like live audio and runs in the real-time class (`--realtime 0` to disable); back-to-back RT hops
+  get demoted and measure 5x slower. `prof_regions.py` runs without RT for per-region work numbers.
+
+Next lever (not done): the scan is ~60% of the work and sits at the CPU FP ceiling. Offloading the scans to the GPU (Metal,
+unified memory, 4096 lanes per scan) could cut CPU at 48k from ~1.8 to well under 1 core, at the cost of GPU scheduling jitter.

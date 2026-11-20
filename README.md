@@ -35,25 +35,32 @@ On an M3 Air, 12 kHz with 4 layers runs in real time: about 15 ms per 20 ms hop,
 cd ~/Coding/reuse-mic/native
 ./reuse devices                                            # list mics and outputs
 ./reuse live --input "MacBook Air Microphone"              # 16 kHz, 4 layers: about 0.4 of one core
-./reuse live --input "MacBook Air Microphone" --layers 12 --threads 2   # full model, 2 cores
+./reuse live --input "MacBook Air Microphone" --rate 48000           # full band (up to 24 kHz): 4 threads, about 1.8 cores
+./reuse live --input "MacBook Air Microphone" --rate 32000           # wide band: 2 threads, about 0.95 core
+./reuse live --input "MacBook Air Microphone" --layers 12 --threads 2   # full model depth, 2 cores
 ./reuse file in.mp4 out.wav --layers 12 --threads 2        # clean a file (any format CoreAudio reads)
-./reuse bench --rate 16000 --layers 8                      # time per 20 ms hop
+./reuse bench --rate 48000 --layers 4                      # time per 20 ms hop and CPU (paced like live)
 ```
 
 Pick **BlackHole 2ch** as the mic in the meeting app, as above. Enter toggles Enhanced/Raw.
 
-Menu bar app: `native/app/ReuseMic.app` (Start/Stop, Enhanced toggle, Quality, Microphone). First start asks for mic access. Rebuild with `native/app/build_app.sh`.
+Menu bar app: `native/app/ReuseMic.app` (Start/Stop, Enhanced toggle, Quality incl. Wide band 32 kHz and Full band 48 kHz, Microphone). First start asks for mic access. Rebuild with `native/app/build_app.sh`.
 
-| Setting | Time per 20 ms hop (M3 Air) | Whole-process CPU | 90 s soak on a busy Mac |
+`--threads` defaults by rate: 1 up to 16 kHz, 2 up to 32 kHz, 4 above. Higher rates keep the top of the voice
+(consonants, "air"): 16 kHz output stops at 8 kHz, 48 kHz output reaches about 20 kHz.
+
+| Setting | Time per 20 ms hop (M3 Air) | Whole-process CPU | Soak (60 to 90 s) |
 |---|---|---|---|
-| 16 kHz, 4 layers, 1 thread (**daily**) | 8.5 ms | 0.45 core | 0 glitches (also with `--cushion 2`) |
+| 48 kHz, 4 layers, 4 threads (**full band**) | 8.7 ms | 1.8 cores | 0 glitches |
+| 32 kHz, 4 layers, 2 threads (**wide band**) | 9.2 ms | 0.95 core | 0 glitches |
+| 16 kHz, 4 layers, 1 thread (**daily**) | 7.6 ms | 0.4 core | 0 glitches (also with `--cushion 2`) |
 | 16 kHz, 8 layers, 2 threads (**high**) | 8.9 ms | about 0.9 core | 0 glitches |
 | 16 kHz, 12 layers, 2 threads | 12.7 ms | 1.2 cores | some glitches when other apps load the CPU |
 | Python `live_mic.py`, 16 kHz, 4 layers | 15+ ms | 1.5 cores | 500 late hops |
 
 The worker runs in the macOS real-time class and all model memory is pinned (mlock), so a busy or swapping Mac does not stall it. Latency is about 100 ms (`--cushion 3`, default) or about 80 ms (`--cushion 2`).
 
-Rebuild: `./build.sh`. Re-export weights: `../.venv/bin/python export_weights.py reuse_rt.bin`. Checks: `parity.py`, `parity_live.py`. Details: `NOTES.md`.
+Rebuild: `./build.sh`. Kernel tools and A/B helpers: `native/lab/` (scan microbenchmark, spectrograms, SNR). Re-export weights: `../.venv/bin/python export_weights.py reuse_rt.bin`. Checks: `parity.py`, `parity_live.py`. Details: `NOTES.md`.
 
 ## Check
 

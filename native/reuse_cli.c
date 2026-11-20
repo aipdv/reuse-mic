@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <sys/resource.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -40,6 +41,9 @@ static const char *weights_path(void) {
     if (_NSGetExecutablePath(buf, &n) == 0) { char *real = realpath(buf, NULL); snprintf(out, sizeof out, "%s/reuse_rt.bin", dirname(real ? real : buf)); free(real); return out; }
     return "reuse_rt.bin";
 }
+// default worker count by model rate (M3 Air, 4 layers): the hop must stay well under the 15 ms real-time budget,
+// or macOS demotes the thread. 16 kHz: 1 (9 ms), 24/32 kHz: 2 (7/9 ms), 48 kHz: 4 (8.7 ms; 2 threads hit 13 ms and glitch).
+static int auto_threads(int rate) { return rate > 32000 ? 4 : rate > 16000 ? 2 : 1; }
 static double now_ms(void) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return mach_absolute_time() * (double)tb.numer / tb.denom / 1e6; }
 #define CK(x) do { OSStatus _s = (x); if (_s) { fprintf(stderr, "CoreAudio error %d at %s:%d (%s)\n", (int)_s, __FILE__, __LINE__, #x); exit(1); } } while (0)
 
@@ -214,7 +218,7 @@ static int cmd_live(int argc, char **argv) {
     if ((!din && !g.feed_path) || !dout) { fprintf(stderr, "device not found (input %s, output %s). Run: reuse devices\n", in_name ? in_name : "default", out_name); return 1; }
     char ni[256], no[256]; if (din) dev_name(din, ni, sizeof ni); else snprintf(ni, sizeof ni, "file %s", g.feed_path); dev_name(dout, no, sizeof no);
     g.live = re_live_create(weights_path(), g.rate, layers);
-    if (g.live) re_live_set_threads(g.live, arg_i(argc, argv, "--threads", 1));
+    if (g.live) re_live_set_threads(g.live, arg_i(argc, argv, "--threads", auto_threads(arg_i(argc, argv, "--rate", 16000))));
     g.realtime = arg_i(argc, argv, "--realtime", 1);
     if (g.realtime) re_set_realtime(1000.0 * re_live_hop(g.live) / g.rate, 0.75 * 1000.0 * re_live_hop(g.live) / g.rate);
     if (!g.live) { fprintf(stderr, "cannot load model (weights %s, rate %d, layers %d)\n", weights_path(), g.rate, layers); return 1; }
@@ -289,7 +293,7 @@ static int cmd_file(int argc, char **argv) {
     if (argc < 4) { fprintf(stderr, "usage: reuse file IN OUT [--rate 16000] [--layers 4]\n"); return 1; }
     int rate = arg_i(argc, argv, "--rate", 16000), layers = arg_i(argc, argv, "--layers", 4);
     void *L = re_live_create(weights_path(), rate, layers); if (!L) { fprintf(stderr, "cannot load model\n"); return 1; }
-    re_live_set_threads(L, arg_i(argc, argv, "--threads", 1));
+    re_live_set_threads(L, arg_i(argc, argv, "--threads", auto_threads(arg_i(argc, argv, "--rate", 16000))));
     int H = re_live_hop(L);
     CFURLRef iu = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)argv[2], strlen(argv[2]), false);
     CFURLRef ou = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)argv[3], strlen(argv[3]), false);
@@ -320,12 +324,23 @@ static int cmd_file(int argc, char **argv) {
 
 static int cmd_bench(int argc, char **argv) {
     int rate = arg_i(argc, argv, "--rate", 16000), layers = arg_i(argc, argv, "--layers", 4);
+    if (arg_i(argc, argv, "--realtime", 1)) { re_set_realtime(20.0, 15.0); re_rt_self(20.0, 15.0); }  // same class as live (20 ms hop)
     void *L = re_live_create(weights_path(), rate, layers); if (!L) { fprintf(stderr, "cannot load model\n"); return 1; }
-    re_live_set_threads(L, arg_i(argc, argv, "--threads", 1));
+    re_live_set_threads(L, arg_i(argc, argv, "--threads", auto_threads(arg_i(argc, argv, "--rate", 16000))));
     int H = re_live_hop(L); float *x = calloc(H, 4), *y = calloc(H, 4); double t[500];
-    for (int i = 0; i < 520; i++) { for (int n = 0; n < H; n++) x[n] = 0.05f * sinf(0.01f * (i * H + n)) + 0.01f * ((rand() & 1023) / 512.f - 1); double t0 = now_ms(); re_live_process(L, x, y); if (i >= 20) t[i - 20] = now_ms() - t0; }
+    // hops are paced every hop_ms like live audio: a real-time thread that runs back to back blows its budget and gets demoted
+    mach_timebase_info_data_t tb; mach_timebase_info(&tb); uint64_t hop_ticks = (uint64_t)(1e6 * 1000.0 * H / rate * tb.denom / tb.numer), next = mach_absolute_time();
+    struct rusage ru0, ru1; double w0 = 0;
+    for (int i = 0; i < 520; i++) {
+        if (i == 20) { getrusage(RUSAGE_SELF, &ru0); w0 = now_ms(); }
+        for (int n = 0; n < H; n++) x[n] = 0.05f * sinf(0.01f * (i * H + n)) + 0.01f * ((rand() & 1023) / 512.f - 1);
+        next += hop_ticks; double t0 = now_ms(); re_live_process(L, x, y); if (i >= 20) t[i - 20] = now_ms() - t0;
+        if (mach_absolute_time() < next) mach_wait_until(next); else next = mach_absolute_time();
+    }
     qsort(t, 500, sizeof(double), cmp_d);
-    printf("%d Hz, %d layers: hop %.0f ms, compute median %.2f ms, p95 %.2f ms, busy %.0f%% of each hop\n", rate, layers, 1000.0 * H / rate, t[250], t[475], 100.0 * t[250] / (1000.0 * H / rate));
+    getrusage(RUSAGE_SELF, &ru1);
+    double cpu = (ru1.ru_utime.tv_sec - ru0.ru_utime.tv_sec + ru1.ru_stime.tv_sec - ru0.ru_stime.tv_sec) * 1e3 + (ru1.ru_utime.tv_usec - ru0.ru_utime.tv_usec + ru1.ru_stime.tv_usec - ru0.ru_stime.tv_usec) / 1e3;
+    printf("%d Hz, %d layers: hop %.0f ms, compute median %.2f ms, p95 %.2f ms, max %.2f ms, busy %.0f%% of each hop, CPU %.2f cores\n", rate, layers, 1000.0 * H / rate, t[250], t[475], t[499], 100.0 * t[250] / (1000.0 * H / rate), cpu / (now_ms() - w0));
     return 0;
 }
 
@@ -343,7 +358,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "live")) return cmd_live(argc, argv);
     if (!strcmp(cmd, "file")) return cmd_file(argc, argv);
     if (!strcmp(cmd, "bench")) return cmd_bench(argc, argv);
-    fprintf(stderr, "usage:\n  reuse devices\n  reuse live [--input NAME] [--output \"BlackHole 2ch\"] [--rate 16000] [--layers 4] [--threads 1|2] [--cushion 3] [--realtime 1|0] [--seconds N]\n"
+    fprintf(stderr, "usage:\n  reuse devices\n  reuse live [--input NAME] [--output \"BlackHole 2ch\"] [--rate 16000] [--layers 4] [--threads 1..4 (default by rate)] [--cushion 3] [--realtime 1|0] [--seconds N]\n"
                     "  reuse file IN OUT [--rate 16000] [--layers 4]\n  reuse bench [--rate 16000] [--layers 4]\n");
     return 2;
 }

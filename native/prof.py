@@ -12,7 +12,7 @@ out = (ctypes.c_double * 8)(); lib.re_prof(out)
 t = time.perf_counter(); N = 200
 for _ in range(N): lib.re_step(e, *a)
 tot = (time.perf_counter() - t) / N * 1e3; lib.re_prof(out)
-names = {0: "ssm scan", 2: "sgemm (all)", 5: "conv+silu", 6: "ln+prelu", 7: "softplus+gate"}
-print(f"total {tot:.2f} ms/hop")
+names = {0: "ssm scan", 2: "sgemm (all)", 5: "conv+silu", 6: "ln+prelu"}  # softplus + gate run inside the scan pre-pass
+print(f"total {tot:.2f} ms/hop; scan groups per hop {out[3]/N:.0f}, on the clamped slow path {out[1]/N:.0f}")
 for i, n in names.items(): print(f"  {n:16s} {out[i]/N:6.2f} ms")
 print(f"  {'other':16s} {tot - sum(out[i] for i in names)/N:6.2f} ms")
