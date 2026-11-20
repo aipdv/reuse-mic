@@ -74,4 +74,4 @@ Rebuild: `./build.sh`. Kernel tools and A/B helpers: `native/lab/` (scan microbe
 - `opt/`: PyTorch-path optimisation log (`PLAN.md`), bench harness, rejected scan-kernel variants.
 - `tools/make_ab.py`: in-place A/B/C comparison video (one clip, audio switches between models).
 
-License: the model is NVIDIA One-Way Noncommercial (NSCLv1). Use it for personal demos only.
+License: the code in this repo is MIT (see `LICENSE`). The model weights are NVIDIA One-Way Noncommercial (NSCLv1) and are not included; use them for personal demos only.
