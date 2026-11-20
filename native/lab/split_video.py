@@ -1,5 +1,5 @@
 """One-pass split video for a general audience: original audio, then engine A, then engine B, over the unchanged video.
-Right: section title, one big number, a verdict. Bottom: waveform of what you hear, coloured by section, with a playhead.
+Right: section title, one big number, a verdict. Bottom: mel spectrogram of what you hear (sections not playing dimmed) with a playhead.
 
   python split_video.py OUT.mp4 VIDEO ORIG.wav CUT1 CUT2 "title[~subtitle]|number|caption|verdict|out.wav" "title|...|out.wav"
 Sections: 0..CUT1 original, CUT1..CUT2 engine A, CUT2..end engine B. Needs ffmpeg.
@@ -29,8 +29,16 @@ for k in range(3):  # what you hear: section k from track k, 30 ms crossfades
     g[k, cuts[k]:cuts[k + 1]] = 1
     if k: g[k, cuts[k] - f:cuts[k] + f] = np.linspace(0, 1, 2 * f); g[k - 1, cuts[k] - f:cuts[k] + f] = np.linspace(1, 0, 2 * f)
 play = (g * np.stack(tracks)).sum(0)
-peak = np.abs(play).max() + 1e-9
-cols = np.array_split(play, WW)
+
+def mel_image(x):  # log-mel spectrogram (128 bands, 0..sr/2), magma-like colours, 80 dB range -> RGB array [WH][WW]
+    import torch, torchaudio
+    m = torchaudio.transforms.MelSpectrogram(sr, n_fft=2048, hop_length=256, n_mels=128, f_min=20, f_max=sr / 2)(torch.from_numpy(x))
+    S = 10 * np.log10(m.numpy() + 1e-10); S = np.clip((S - (S.max() - 80)) / 80, 0, 1)[::-1]
+    q = np.array(Image.fromarray((S * 255).astype(np.uint8)).resize((WW, WH), Image.BILINEAR)) / 255.0
+    stops = np.array([[0, 0, 4], [59, 15, 112], [140, 41, 129], [222, 73, 104], [254, 159, 109], [252, 253, 191]], float)
+    pos = q * (len(stops) - 1); i = np.minimum(pos.astype(int), len(stops) - 2); t = (pos - i)[..., None]
+    return (stops[i] * (1 - t) + stops[i + 1] * t).astype(np.uint8)
+mel = mel_image(play)
 
 tmp = tempfile.mkdtemp(); bgs = []
 cards = [("Original sound", "", "Music and voice, not cleaned", "")] + [tuple(e[:4]) for e in eng]
@@ -51,11 +59,11 @@ for k, (title, num, cap, verdict) in enumerate(cards):
         d.rounded_rectangle([cx, 580, W - 24, 660], 40, fill=COL[k]); d.text((cx + 34, 598), verdict, font=font(40, True), fill="black")
     for j, (a, b) in enumerate(((0, c1), (c1, c2), (c2, dur))):
         xa, xb = WX + int(WW * a / dur), WX + int(WW * b / dur); on = j == k
-        for x in range(xa, xb):  # waveform, brighter for the section playing
-            c = cols[x - WX]; h = int(WH / 2 * min(1, np.abs(c).max() / peak)) if len(c) else 0
-            d.line([(x, WY + WH // 2 - max(h, 1)), (x, WY + WH // 2 + max(h, 1))], fill=COL[j] if on else "#3a3a3a")
+        part = mel[:, xa - WX:xb - WX] if on else (mel[:, xa - WX:xb - WX] * 0.28).astype(np.uint8)  # dim the sections not playing
+        img.paste(Image.fromarray(part), (xa, WY))
         d.rounded_rectangle([xa + 4, BY, xb - 4, BY + 56], 12, fill=COL[j] if on else "#1c1c1c")
         d.text((xa + 22, BY + 12), cards[j][0].partition("~")[0], font=font(28, on), fill="black" if on else COL[j])
+    d.rounded_rectangle([WX + 8, WY + 8, WX + 190, WY + 40], 8, fill="black"); d.text((WX + 18, WY + 12), "What you hear", font=font(22), fill="white")
     p = os.path.join(tmp, f"bg{k}.png"); img.save(p); bgs.append(p)
 aw = os.path.join(tmp, "a.wav"); sf.write(aw, play, sr)
 fc = (f"[3:v]scale={VW}:{VH},setsar=1,fps={FPS}[v];"
