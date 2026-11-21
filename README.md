@@ -2,6 +2,21 @@
 
 An "Enhanced" virtual mic for any app. It cleans your mic live with NVIDIA Real-time RE-USE on the Mac CPU (no CUDA) and sends the result to BlackHole 2ch.
 
+## Model
+
+- [NVIDIA Real-time RE-USE](https://huggingface.co/nvidia/Real-time_RE-USE) (streaming), model version `12_random_layer_ahead_sep_conv2_1010k`. Not the offline [RE-USE](https://huggingface.co/nvidia/RE-USE).
+- 3.7M parameters at the full 12 layers; a setting runs only part of it (2.0M at 4 layers, 2.9M at 8).
+- Weights are used unchanged. This repo rewrites the engine that runs them (C, Accelerate, NEON), not the model.
+
+## Speed vs NVIDIA's code (M3 MacBook Air, CPU, 4 threads each)
+
+| | NVIDIA's PyTorch code | This engine |
+|---|---|---|
+| Time to clean each 20 ms of audio (8 layers) | 61.9 ms (44.1 kHz), not real time | 14.1 ms (48 kHz), 4.4x faster |
+| Output difference vs PyTorch | | 77 dB SNR at 48 kHz, 110 dB at 12 kHz (inaudible) |
+
+NVIDIA's code needs CUDA, so the PyTorch number runs it with the CPU Mamba shim in `shim/`. Details: `native/NOTES.md`.
+
 ## Setup (fresh clone)
 
 Weights, NVIDIA code and built binaries are not in git. Recreate them:
@@ -18,7 +33,6 @@ Install [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) for the v
 ## Run
 
 ```bash
-cd ~/Coding/reuse-mic
 .venv/bin/python live_mic.py            # Enter = toggle Enhanced/Raw, Ctrl+C = stop
 ```
 
@@ -29,16 +43,16 @@ On an M3 Air, 12 kHz with 4 layers runs in real time: about 15 ms per 20 ms hop,
 
 ## Native (no Python, recommended)
 
-`native/reuse` is a 73 KB binary: the same model in C (Accelerate + NEON), about 2 to 3 times less CPU than the Python path, same output (110 dB SNR vs PyTorch).
+`native/reuse` is a 91 KB binary: the same model in C (Accelerate + NEON), about 4 times less CPU than the Python path, same output (77 to 110 dB SNR vs PyTorch, inaudible).
 
 ```bash
-cd ~/Coding/reuse-mic/native
+cd native
 ./reuse devices                                            # list mics and outputs
 ./reuse live --input "MacBook Air Microphone"              # 16 kHz, 4 layers: about 0.4 of one core
 ./reuse live --input "MacBook Air Microphone" --rate 48000           # full band (up to 24 kHz): 4 threads, about 1.8 cores
 ./reuse live --input "MacBook Air Microphone" --rate 32000           # wide band: 2 threads, about 0.95 core
-./reuse live --input "MacBook Air Microphone" --layers 12 --threads 2   # full model depth, 2 cores
-./reuse file in.mp4 out.wav --layers 12 --threads 2        # clean a file (any format CoreAudio reads)
+./reuse live --input "MacBook Air Microphone" --layers 12 --threads 4   # full model depth, about 1.5 cores
+./reuse file in.mp4 out.wav --layers 12 --threads 4        # clean a file (any format CoreAudio reads)
 ./reuse bench --rate 48000 --layers 4                      # time per 20 ms hop and CPU (paced like live)
 ```
 
@@ -54,8 +68,8 @@ Menu bar app: `native/app/ReuseMic.app` (Start/Stop, Enhanced toggle, Quality in
 | 48 kHz, 4 layers, 4 threads (**full band**) | 8.7 ms | 1.8 cores | 0 glitches |
 | 32 kHz, 4 layers, 2 threads (**wide band**) | 9.2 ms | 0.95 core | 0 glitches |
 | 16 kHz, 4 layers, 1 thread (**daily**) | 7.6 ms | 0.4 core | 0 glitches (also with `--cushion 2`) |
-| 16 kHz, 8 layers, 2 threads (**high**) | 8.9 ms | about 0.9 core | 0 glitches |
-| 16 kHz, 12 layers, 2 threads | 12.7 ms | 1.2 cores | some glitches when other apps load the CPU |
+| 16 kHz, 8 layers, 2 threads (**high**) | 8.7 ms | about 0.9 core | 0 glitches |
+| 16 kHz, 12 layers, 4 threads | 7.5 ms | 1.5 cores | bench only |
 | Python `live_mic.py`, 16 kHz, 4 layers | 15+ ms | 1.5 cores | 500 late hops |
 
 The worker runs in the macOS real-time class and all model memory is pinned (mlock), so a busy or swapping Mac does not stall it. Latency is about 100 ms (`--cushion 3`, default) or about 80 ms (`--cushion 2`).

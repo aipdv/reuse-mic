@@ -4,7 +4,7 @@ import AppKit
 
 struct Quality { let title: String; let args: [String] }
 let qualities = [
-    Quality(title: "Light: 16 kHz, 4 layers (about 0.45 core)", args: ["--rate", "16000", "--layers", "4", "--threads", "1"]),
+    Quality(title: "Light: 16 kHz, 4 layers (about 0.4 core)", args: ["--rate", "16000", "--layers", "4", "--threads", "1"]),
     Quality(title: "High: 16 kHz, 8 layers, 2 threads (about 0.9 core)", args: ["--rate", "16000", "--layers", "8", "--threads", "2"]),
     Quality(title: "Wide band: 32 kHz, 4 layers, 2 threads (about 0.95 core)", args: ["--rate", "32000", "--layers", "4", "--threads", "2"]),
     Quality(title: "Full band: 48 kHz, 4 layers, 4 threads (about 1.8 cores)", args: ["--rate", "48000", "--layers", "4", "--threads", "4"]),
