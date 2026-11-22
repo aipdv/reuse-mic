@@ -2,6 +2,12 @@
 
 An "Enhanced" virtual mic for any app. It cleans your mic live with NVIDIA Real-time RE-USE on the Mac CPU (no CUDA) and sends the result to BlackHole 2ch.
 
+![ReuseMic in the macOS menu bar: Start/Stop, Enhanced toggle, Quality presets, Microphone](docs/menu.png)
+
+![Spectrogram of the same clip before and after reuse-mic](docs/spectrogram.png)
+
+The raw clip stops at 16 kHz. At 48 kHz the model also fills the band above it.
+
 ## Model
 
 - [NVIDIA Real-time RE-USE](https://huggingface.co/nvidia/Real-time_RE-USE) (streaming), model version `12_random_layer_ahead_sep_conv2_1010k`. Not the offline [RE-USE](https://huggingface.co/nvidia/RE-USE).
@@ -10,19 +16,25 @@ An "Enhanced" virtual mic for any app. It cleans your mic live with NVIDIA Real-
 
 ## Speed vs NVIDIA's code (M3 MacBook Air, CPU, 4 threads each)
 
-| | NVIDIA's PyTorch code | This engine |
-|---|---|---|
-| Time to clean each 20 ms of audio (8 layers) | 61.9 ms (44.1 kHz), not real time | 14.1 ms (48 kHz), 4.4x faster |
-| Output difference vs PyTorch | | 77 dB SNR at 48 kHz, 110 dB at 12 kHz (inaudible) |
+Time to clean each 20 ms of audio, both at 48 kHz, same clip:
 
-NVIDIA's code needs CUDA, so the PyTorch number runs it with the CPU Mamba shim in `shim/`. Details: `native/NOTES.md`.
+![Bar chart: NVIDIA PyTorch code vs this engine, ms per 20 ms hop, with the 20 ms deadline](docs/speed.png)
+
+| Layers | NVIDIA's PyTorch code | This engine | Speedup | Live as a mic? |
+|---|---|---|---|---|
+| 4 | 43.0 ms | 8.6 ms (p95 8.8), 1.8 cores | 5x | **Yes**: 60 s soak, 0 glitches |
+| 8 | 63.6 ms | 14.1 to 15.8 ms (p95 15 to 28), 3 cores | 4x | **No**: misses the 20 ms deadline in some runs |
+
+Output difference vs PyTorch: 60 dB SNR on a 15 s clip at 48 kHz, up to 110 dB at 12 kHz (inaudible).
+
+NVIDIA's code needs CUDA, so the PyTorch number runs it with the CPU Mamba shim in `shim/` (`native/lab/run_torch.py`). The engine number is `reuse bench` (real-time class, paced every 20 ms). Details: `native/NOTES.md`.
 
 ## Setup (fresh clone)
 
 Weights, NVIDIA code and built binaries are not in git. Recreate them:
 
 ```bash
-uv venv -p 3.12 .venv && uv pip install -p .venv torch numpy soundfile sounddevice einops pyyaml safetensors huggingface_hub
+uv venv -p 3.12 .venv && uv pip install -p .venv torch numpy soundfile sounddevice einops pyyaml safetensors huggingface_hub torchaudio
 scripts/fetch_vendor.sh                                    # NVIDIA repos -> vendor/
 cd native && ../.venv/bin/python export_weights.py reuse_rt.bin && ./build.sh   # native weights + binary
 app/build_app.sh                                           # ReuseMic.app (optional)
@@ -43,7 +55,7 @@ On an M3 Air, 12 kHz with 4 layers runs in real time: about 15 ms per 20 ms hop,
 
 ## Native (no Python, recommended)
 
-`native/reuse` is a 91 KB binary: the same model in C (Accelerate + NEON), about 4 times less CPU than the Python path, same output (77 to 110 dB SNR vs PyTorch, inaudible).
+`native/reuse` is a 91 KB binary: the same model in C (Accelerate + NEON), about 4 times less CPU than the Python path, same output (60 to 110 dB SNR vs PyTorch, inaudible).
 
 ```bash
 cd native
@@ -62,6 +74,8 @@ Menu bar app: `native/app/ReuseMic.app` (Start/Stop, Enhanced toggle, Quality in
 
 `--threads` defaults by rate: 1 up to 16 kHz, 2 up to 32 kHz, 4 above. Higher rates keep the top of the voice
 (consonants, "air"): 16 kHz output stops at 8 kHz, 48 kHz output reaches about 20 kHz.
+
+![Time per hop and CPU cores for each native setting](docs/settings.png)
 
 | Setting | Time per 20 ms hop (M3 Air) | Whole-process CPU | Soak (60 to 90 s) |
 |---|---|---|---|
@@ -87,5 +101,6 @@ Rebuild: `./build.sh`. Kernel tools and A/B helpers: `native/lab/` (scan microbe
 - `vendor/Realtime_REUSE/`: NVIDIA checkpoint and code, unchanged. Not committed; `scripts/fetch_vendor.sh` downloads it.
 - `opt/`: PyTorch-path optimisation log (`PLAN.md`), bench harness, rejected scan-kernel variants.
 - `tools/make_ab.py`: in-place A/B/C comparison video (one clip, audio switches between models).
+- `docs/`: README images. Charts: `uv run --with matplotlib --with soundfile docs/make_figures.py RAW.wav CLEAN.wav`.
 
 License: the code in this repo is MIT (see `LICENSE`). The model weights are NVIDIA One-Way Noncommercial (NSCLv1) and are not included; use them for personal demos only.
